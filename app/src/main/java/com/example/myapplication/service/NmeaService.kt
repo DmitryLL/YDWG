@@ -33,6 +33,11 @@ import java.util.Locale
 data class NmeaUiState(
     val isConnected: Boolean = false,
     val headingTrue: Double? = null,
+    val windSpeedKnots: Double? = null,
+    val windDirectionDeg: Double? = null,
+    val speedKnots: Double? = null,
+    val depthMeters: Double? = null,
+    val waterTempC: Double? = null,
     val recordCount: Long = 0L,
     val lastUpdateMs: Long = 0L,
     val errorMessage: String? = null,
@@ -52,7 +57,8 @@ class NmeaService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var collectJob: Job? = null
-    private var lastHeadingUpdateMs = 0L
+    // Время последней записи в БД по каждому типу — троттлим не чаще 1 раза в секунду на тип
+    private val lastWriteByType = mutableMapOf<String, Long>()
     private val phoneTimeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
 
     private val _uiState = MutableStateFlow(NmeaUiState())
@@ -78,7 +84,7 @@ class NmeaService : Service() {
      */
     fun startListening(host: String = "192.168.4.1", port: Int = 1457) {
         collectJob?.cancel()
-        lastHeadingUpdateMs = 0L
+        lastWriteByType.clear()
 
         val flow = NmeaTcpClient(host, port).receive()
         val dao = AppDatabase.getInstance(applicationContext).nmeaDao()
@@ -107,30 +113,50 @@ class NmeaService : Service() {
                         lastRawSentences = updatedRaw
                     )
 
-                    val data = NmeaParser.parse(sentence) ?: return@collect
+                    // Передаём последний известный курс — нужен для пеленга ветра от севера
+                    val dataList = NmeaParser.parse(sentence, _uiState.value.headingTrue)
+                    if (dataList.isEmpty()) return@collect
 
-                    // Обновляем курс не чаще 1 раза в секунду
                     val now = System.currentTimeMillis()
-                    if (now - lastHeadingUpdateMs < 1000L) return@collect
-                    lastHeadingUpdateMs = now
+                    var wrote = false
+                    for (data in dataList) {
+                        // Обновляем экран сразу для каждого типа (курс ещё читает парсер ветра), без троттлинга
+                        when (data.type) {
+                            NmeaParser.TYPE_HEADING -> _uiState.value =
+                                _uiState.value.copy(headingTrue = data.value, lastUpdateMs = now)
+                            NmeaParser.TYPE_WIND_SPEED -> _uiState.value =
+                                _uiState.value.copy(windSpeedKnots = data.value, lastUpdateMs = now)
+                            NmeaParser.TYPE_WIND_DIRECTION -> _uiState.value =
+                                _uiState.value.copy(windDirectionDeg = data.value, lastUpdateMs = now)
+                            NmeaParser.TYPE_SPEED_KNOTS -> _uiState.value =
+                                _uiState.value.copy(speedKnots = data.value, lastUpdateMs = now)
+                            NmeaParser.TYPE_DEPTH_METERS -> _uiState.value =
+                                _uiState.value.copy(depthMeters = data.value, lastUpdateMs = now)
+                            NmeaParser.TYPE_WATER_TEMP -> _uiState.value =
+                                _uiState.value.copy(waterTempC = data.value, lastUpdateMs = now)
+                        }
 
-                    _uiState.value = _uiState.value.copy(
-                        headingTrue = data.value,
-                        lastUpdateMs = now
-                    )
+                        // Пишем в БД не чаще 1 раза в секунду на каждый тип
+                        val lastWrite = lastWriteByType[data.type] ?: 0L
+                        if (now - lastWrite < 1000L) continue
+                        lastWriteByType[data.type] = now
 
-                    dao.insert(
-                        NmeaRecord(
-                            timestamp = now,
-                            type = data.type,
-                            value = data.value,
-                            unit = data.unit,
-                            rawSentence = sentence
+                        dao.insert(
+                            NmeaRecord(
+                                timestamp = now,
+                                type = data.type,
+                                value = data.value,
+                                unit = data.unit,
+                                rawSentence = sentence
+                            )
                         )
-                    )
+                        wrote = true
+                    }
 
-                    val count = dao.getCount()
-                    _uiState.value = _uiState.value.copy(recordCount = count)
+                    if (wrote) {
+                        val count = dao.getCount()
+                        _uiState.value = _uiState.value.copy(recordCount = count)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(tag, "Ошибка получения данных: ${e.message}")
@@ -178,7 +204,7 @@ class NmeaService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, channelId)
-            .setContentTitle("YDWG Monitor")
+            .setContentTitle("YDWG")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setContentIntent(pendingIntent)

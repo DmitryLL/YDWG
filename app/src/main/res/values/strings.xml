@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">YDWG Monitor</string>
+    <string name="app_name">YDWG</string>
     <string name="btn_connect">Подключить</string>
     <string name="btn_disconnect">Отключить</string>
 </resources>

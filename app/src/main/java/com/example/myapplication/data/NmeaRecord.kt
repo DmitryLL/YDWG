@@ -5,14 +5,14 @@ import androidx.room.PrimaryKey
 
 /**
  * Одна запись в локальной базе данных.
- * Хранит показание компаса или глубины с временной меткой.
+ * Хранит показание датчика (курс, ветер и т.п.) с временной меткой.
  */
 @Entity(tableName = "nmea_records")
 data class NmeaRecord(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val timestamp: Long,       // System.currentTimeMillis()
-    val type: String,          // "HEADING_MAGNETIC", "HEADING_TRUE", "DEPTH_METERS"
-    val value: Double,         // курс в градусах или глубина в метрах
-    val unit: String,          // "°" или "м"
-    val rawSentence: String    // оригинальная NMEA строка, например $HCHDG,245.1,...
+    val type: String,          // "HEADING", "WIND_SPEED_KNOTS", "WIND_DIRECTION"
+    val value: Double,         // курс/направление в градусах или скорость ветра в узлах
+    val unit: String,          // "°" или "уз"
+    val rawSentence: String    // оригинальная RAW NMEA 2000 строка
 )
