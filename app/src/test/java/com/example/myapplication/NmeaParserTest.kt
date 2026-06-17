@@ -106,6 +106,39 @@ class NmeaParserTest {
         assertTrue(NmeaParser.parse(line).isEmpty())
     }
 
+    // ── Raymarine Axiom 7 (GPS) ──────────────────────────────────────────────────
+
+    @Test
+    fun gpsPosition_latLonInDegrees() {
+        // PGN 129025: lat=10° (raw 100000000 = 0x05F5E100), lon=20° (raw 200000000 = 0x0BEBC200)
+        val line = "10:20:30.500 R 0DF80116 00 E1 F5 05 00 C2 EB 0B"
+        val result = NmeaParser.parse(line)
+        val lat = result.first { it.type == NmeaParser.TYPE_GPS_LAT }
+        val lon = result.first { it.type == NmeaParser.TYPE_GPS_LON }
+        assertEquals(10.0, lat.value, 1e-6)
+        assertEquals(20.0, lon.value, 1e-6)
+    }
+
+    @Test
+    fun gpsPosition_southWest_isNegative() {
+        // lat = -10° (int32 -100000000 = 0xFA0A1F00, LE = 00 1F 0A FA)
+        val line = "10:20:30.500 R 0DF80116 00 1F 0A FA 00 C2 EB 0B"
+        val lat = NmeaParser.parse(line).first { it.type == NmeaParser.TYPE_GPS_LAT }
+        assertEquals(-10.0, lat.value, 1e-6)
+    }
+
+    @Test
+    fun gpsCogSog_courseDegreesAndSpeedKnots() {
+        // PGN 129026: COG=90° (raw 15708 = 0x3D5C), SOG=5 уз (raw 257 = 0x0101)
+        val line = "10:20:30.500 R 0DF80216 00 00 5C 3D 01 01 FF FF"
+        val result = NmeaParser.parse(line)
+        val cog = result.first { it.type == NmeaParser.TYPE_GPS_COG }
+        val sog = result.first { it.type == NmeaParser.TYPE_GPS_SOG }
+        assertEquals(90.0, cog.value, 0.1)
+        assertEquals(5.0, sog.value, 0.05)
+        assertEquals("уз", sog.unit)
+    }
+
     @Test
     fun transmittedAndUnknownLines_areIgnored() {
         // Направление T (отправлено) — игнорируем

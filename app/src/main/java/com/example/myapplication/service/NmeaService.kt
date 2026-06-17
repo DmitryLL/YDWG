@@ -25,9 +25,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 // Состояние UI — передаётся в Activity через StateFlow
 data class NmeaUiState(
@@ -38,11 +35,11 @@ data class NmeaUiState(
     val speedKnots: Double? = null,
     val depthMeters: Double? = null,
     val waterTempC: Double? = null,
-    val recordCount: Long = 0L,
-    val lastUpdateMs: Long = 0L,
-    val errorMessage: String? = null,
-    val rawPacketCount: Long = 0L,
-    val lastRawSentences: List<String> = emptyList()
+    val gpsLat: Double? = null,
+    val gpsLon: Double? = null,
+    val gpsSog: Double? = null,
+    val gpsCog: Double? = null,
+    val errorMessage: String? = null
 )
 
 /**
@@ -59,7 +56,6 @@ class NmeaService : Service() {
     private var collectJob: Job? = null
     // Время последней записи в БД по каждому типу — троттлим не чаще 1 раза в секунду на тип
     private val lastWriteByType = mutableMapOf<String, Long>()
-    private val phoneTimeFmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
 
     private val _uiState = MutableStateFlow(NmeaUiState())
     val uiState: StateFlow<NmeaUiState> = _uiState.asStateFlow()
@@ -99,63 +95,55 @@ class NmeaService : Service() {
             dao.deleteOlderThan(cutoff)
             Log.i(tag, "Очистка БД: удалены записи старше 7 дней")
 
+            // Последний курс держим отдельно (нужен парсеру ветра сразу), а экран обновляем раз в секунду
+            var latestHeading: Double? = null
+            var pending = NmeaUiState(isConnected = true)
+            var lastUiEmitMs = 0L
+
             try {
                 flow.collect { sentence ->
-                    Log.d(tag, "RAW: $sentence")
-
-                    // Заменяем время устройства на время телефона
-                    val phoneTime = phoneTimeFmt.format(Date())
-                    val displayLine = sentence.replaceFirst(Regex("^\\S+"), phoneTime)
-
-                    val updatedRaw = (_uiState.value.lastRawSentences + displayLine).takeLast(6)
-                    _uiState.value = _uiState.value.copy(
-                        rawPacketCount = _uiState.value.rawPacketCount + 1,
-                        lastRawSentences = updatedRaw
-                    )
-
-                    // Передаём последний известный курс — нужен для пеленга ветра от севера
-                    val dataList = NmeaParser.parse(sentence, _uiState.value.headingTrue)
+                    val dataList = NmeaParser.parse(sentence, latestHeading)
                     if (dataList.isEmpty()) return@collect
 
                     val now = System.currentTimeMillis()
-                    var wrote = false
                     for (data in dataList) {
-                        // Обновляем экран сразу для каждого типа (курс ещё читает парсер ветра), без троттлинга
-                        when (data.type) {
-                            NmeaParser.TYPE_HEADING -> _uiState.value =
-                                _uiState.value.copy(headingTrue = data.value, lastUpdateMs = now)
-                            NmeaParser.TYPE_WIND_SPEED -> _uiState.value =
-                                _uiState.value.copy(windSpeedKnots = data.value, lastUpdateMs = now)
-                            NmeaParser.TYPE_WIND_DIRECTION -> _uiState.value =
-                                _uiState.value.copy(windDirectionDeg = data.value, lastUpdateMs = now)
-                            NmeaParser.TYPE_SPEED_KNOTS -> _uiState.value =
-                                _uiState.value.copy(speedKnots = data.value, lastUpdateMs = now)
-                            NmeaParser.TYPE_DEPTH_METERS -> _uiState.value =
-                                _uiState.value.copy(depthMeters = data.value, lastUpdateMs = now)
-                            NmeaParser.TYPE_WATER_TEMP -> _uiState.value =
-                                _uiState.value.copy(waterTempC = data.value, lastUpdateMs = now)
+                        if (data.type == NmeaParser.TYPE_HEADING) latestHeading = data.value
+
+                        // Копим последнее значение каждого датчика (в память, без обновления экрана)
+                        pending = when (data.type) {
+                            NmeaParser.TYPE_HEADING -> pending.copy(headingTrue = data.value)
+                            NmeaParser.TYPE_WIND_SPEED -> pending.copy(windSpeedKnots = data.value)
+                            NmeaParser.TYPE_WIND_DIRECTION -> pending.copy(windDirectionDeg = data.value)
+                            NmeaParser.TYPE_SPEED_KNOTS -> pending.copy(speedKnots = data.value)
+                            NmeaParser.TYPE_DEPTH_METERS -> pending.copy(depthMeters = data.value)
+                            NmeaParser.TYPE_WATER_TEMP -> pending.copy(waterTempC = data.value)
+                            NmeaParser.TYPE_GPS_LAT -> pending.copy(gpsLat = data.value)
+                            NmeaParser.TYPE_GPS_LON -> pending.copy(gpsLon = data.value)
+                            NmeaParser.TYPE_GPS_SOG -> pending.copy(gpsSog = data.value)
+                            NmeaParser.TYPE_GPS_COG -> pending.copy(gpsCog = data.value)
+                            else -> pending
                         }
 
                         // Пишем в БД не чаще 1 раза в секунду на каждый тип
                         val lastWrite = lastWriteByType[data.type] ?: 0L
-                        if (now - lastWrite < 1000L) continue
-                        lastWriteByType[data.type] = now
-
-                        dao.insert(
-                            NmeaRecord(
-                                timestamp = now,
-                                type = data.type,
-                                value = data.value,
-                                unit = data.unit,
-                                rawSentence = sentence
+                        if (now - lastWrite >= 1000L) {
+                            lastWriteByType[data.type] = now
+                            dao.insert(
+                                NmeaRecord(
+                                    timestamp = now,
+                                    type = data.type,
+                                    value = data.value,
+                                    unit = data.unit,
+                                    rawSentence = sentence
+                                )
                             )
-                        )
-                        wrote = true
+                        }
                     }
 
-                    if (wrote) {
-                        val count = dao.getCount()
-                        _uiState.value = _uiState.value.copy(recordCount = count)
+                    // Обновляем экран не чаще 1 раза в секунду
+                    if (now - lastUiEmitMs >= 1000L) {
+                        lastUiEmitMs = now
+                        _uiState.value = pending
                     }
                 }
             } catch (e: Exception) {

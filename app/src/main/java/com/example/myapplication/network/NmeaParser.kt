@@ -24,6 +24,8 @@ data class NmeaData(
  *   128267 (0x1F50B) — Water Depth (глубина)
  *   130312 (0x1FD08) — Temperature (температура воды)
  *   130316 (0x1FD0C) — Temperature, Extended Range (температура воды, расширенный)
+ *   129025 (0x1F801) — Position, Rapid Update (GPS координаты)
+ *   129026 (0x1F802) — COG & SOG, Rapid Update (GPS курс и скорость)
  *
  * Один CAN-кадр может нести несколько измерений (например ветер = скорость + направление),
  * поэтому parse() возвращает список NmeaData (пустой, если PGN не поддерживается).
@@ -36,6 +38,8 @@ object NmeaParser {
     private const val PGN_WATER_DEPTH = 128267
     private const val PGN_TEMPERATURE = 130312
     private const val PGN_TEMPERATURE_EXT = 130316
+    private const val PGN_GPS_POSITION = 129025
+    private const val PGN_GPS_COG_SOG = 129026
 
     // 1 м/с = 1.94384 узла
     private const val MS_TO_KNOTS = 1.94384
@@ -50,6 +54,10 @@ object NmeaParser {
     const val TYPE_SPEED_KNOTS = "SPEED_WATER_KNOTS"
     const val TYPE_DEPTH_METERS = "DEPTH_METERS"
     const val TYPE_WATER_TEMP = "WATER_TEMP_C"
+    const val TYPE_GPS_LAT = "GPS_LATITUDE"
+    const val TYPE_GPS_LON = "GPS_LONGITUDE"
+    const val TYPE_GPS_SOG = "GPS_SOG_KNOTS"
+    const val TYPE_GPS_COG = "GPS_COG_DEG"
 
     /**
      * Разбирает одну RAW-строку.
@@ -79,6 +87,8 @@ object NmeaParser {
             PGN_WATER_DEPTH -> parseWaterDepth(payload, line)
             PGN_TEMPERATURE -> parseTemperature(payload, line)
             PGN_TEMPERATURE_EXT -> parseTemperatureExt(payload, line)
+            PGN_GPS_POSITION -> parseGpsPosition(payload, line)
+            PGN_GPS_COG_SOG -> parseGpsCogSog(payload, line)
             else -> emptyList()
         }
     }
@@ -233,6 +243,56 @@ object NmeaParser {
 
         val celsius = rawT * 0.001 - KELVIN_OFFSET
         return listOf(NmeaData(type = TYPE_WATER_TEMP, value = celsius, unit = "°C", rawSentence = raw))
+    }
+
+    /**
+     * PGN 129025 — Position, Rapid Update (GPS координаты, Raymarine Axiom)
+     * Bytes 0-3: Latitude  (int32 LE, единица 1e-7 °, 0x7FFFFFFF = нет данных, − = юг)
+     * Bytes 4-7: Longitude (int32 LE, единица 1e-7 °, 0x7FFFFFFF = нет данных, − = запад)
+     */
+    private fun parseGpsPosition(payload: List<Int>, raw: String): List<NmeaData> {
+        if (payload.size < 8) return emptyList()
+
+        val result = mutableListOf<NmeaData>()
+
+        val latRaw = payload[0] or (payload[1] shl 8) or (payload[2] shl 16) or (payload[3] shl 24)
+        if (latRaw != 0x7FFFFFFF) {
+            result += NmeaData(type = TYPE_GPS_LAT, value = latRaw * 1e-7, unit = "°", rawSentence = raw)
+        }
+
+        val lonRaw = payload[4] or (payload[5] shl 8) or (payload[6] shl 16) or (payload[7] shl 24)
+        if (lonRaw != 0x7FFFFFFF) {
+            result += NmeaData(type = TYPE_GPS_LON, value = lonRaw * 1e-7, unit = "°", rawSentence = raw)
+        }
+
+        return result
+    }
+
+    /**
+     * PGN 129026 — COG & SOG, Rapid Update (GPS курс и скорость, Raymarine Axiom)
+     * Byte 0:    SID
+     * Byte 1:    COG Reference (биты 0-1: 0=истинный, 1=магнитный)
+     * Bytes 2-3: COG (uint16 LE, единица 0.0001 рад, 0xFFFF = нет данных)
+     * Bytes 4-5: SOG (uint16 LE, единица 0.01 м/с, 0xFFFF = нет данных) → узлы
+     */
+    private fun parseGpsCogSog(payload: List<Int>, raw: String): List<NmeaData> {
+        if (payload.size < 6) return emptyList()
+
+        val result = mutableListOf<NmeaData>()
+
+        val cogRaw = payload[2] or (payload[3] shl 8)
+        if (cogRaw != 0xFFFF) {
+            val cogDeg = normalizeDeg(Math.toDegrees(cogRaw * 0.0001))
+            result += NmeaData(type = TYPE_GPS_COG, value = cogDeg, unit = "°", rawSentence = raw)
+        }
+
+        val sogRaw = payload[4] or (payload[5] shl 8)
+        if (sogRaw != 0xFFFF) {
+            val knots = sogRaw * 0.01 * MS_TO_KNOTS
+            result += NmeaData(type = TYPE_GPS_SOG, value = knots, unit = "уз", rawSentence = raw)
+        }
+
+        return result
     }
 
     /** Приводит угол в диапазон 0..360 */

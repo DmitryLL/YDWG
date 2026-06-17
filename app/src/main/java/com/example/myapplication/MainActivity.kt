@@ -26,9 +26,6 @@ import com.google.android.material.card.MaterialCardView
 import com.google.android.material.switchmaterial.SwitchMaterial
 import com.google.android.material.textfield.TextInputEditText
 import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
@@ -47,12 +44,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvSpeed: TextView
     private lateinit var tvDepth: TextView
     private lateinit var tvWaterTemp: TextView
-    private lateinit var tvLastUpdate: TextView
-    private lateinit var tvPacketCount: TextView
-    private lateinit var tvRawSentences: TextView
+    private lateinit var tvGpsLat: TextView
+    private lateinit var tvGpsLon: TextView
+    private lateinit var tvGpsSog: TextView
+    private lateinit var tvGpsCog: TextView
     private lateinit var switchTheme: SwitchMaterial
 
-    private val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     private val prefs by lazy { getSharedPreferences("ydwg_settings", MODE_PRIVATE) }
 
     private val notificationPermissionLauncher =
@@ -84,9 +81,10 @@ class MainActivity : AppCompatActivity() {
         tvSpeed        = findViewById(R.id.tvSpeed)
         tvDepth        = findViewById(R.id.tvDepth)
         tvWaterTemp    = findViewById(R.id.tvWaterTemp)
-        tvLastUpdate   = findViewById(R.id.tvLastUpdate)
-        tvPacketCount  = findViewById(R.id.tvPacketCount)
-        tvRawSentences = findViewById(R.id.tvRawSentences)
+        tvGpsLat       = findViewById(R.id.tvGpsLat)
+        tvGpsLon       = findViewById(R.id.tvGpsLon)
+        tvGpsSog       = findViewById(R.id.tvGpsSog)
+        tvGpsCog       = findViewById(R.id.tvGpsCog)
         switchTheme    = findViewById(R.id.switchTheme)
 
         // Восстанавливаем состояние переключателя темы
@@ -155,6 +153,19 @@ class MainActivity : AppCompatActivity() {
         ImageViewCompat.setImageTintList(btnSettings, ColorStateList.valueOf(tint))
     }
 
+    /**
+     * Десятичные градусы → морской формат: DD°MM.mmm' N/S (широта) или DDD°MM.mmm' E/W (долгота).
+     * Знак минус = южная/западная полусфера.
+     */
+    private fun formatCoord(deg: Double, isLat: Boolean): String {
+        val hemi = if (isLat) (if (deg >= 0) "N" else "S") else (if (deg >= 0) "E" else "W")
+        val abs = kotlin.math.abs(deg)
+        val d = abs.toInt()
+        val minutes = (abs - d) * 60.0
+        val fmt = if (isLat) "%02d°%06.3f' %s" else "%03d°%06.3f' %s"
+        return fmt.format(d, minutes, hemi)
+    }
+
     private fun updateUi(state: NmeaUiState) {
         if (state.isConnected) {
             tvStatus.text = "●  Подключено"
@@ -174,9 +185,10 @@ class MainActivity : AppCompatActivity() {
         tvSpeed.text        = state.speedKnots?.let { "%.1f".format(it) } ?: "---"
         tvDepth.text        = state.depthMeters?.let { "%.1f".format(it) } ?: "---"
         tvWaterTemp.text    = state.waterTempC?.let { "%.1f".format(it) } ?: "---"
-        tvLastUpdate.text   = if (state.lastUpdateMs > 0) "Обновлено ${sdf.format(Date(state.lastUpdateMs))}" else ""
-        tvPacketCount.text  = "${state.rawPacketCount} пакетов"
-        tvRawSentences.text = state.lastRawSentences.joinToString("\n").ifEmpty { "Ожидание..." }
+        tvGpsLat.text       = state.gpsLat?.let { formatCoord(it, isLat = true) } ?: "---"
+        tvGpsLon.text       = state.gpsLon?.let { formatCoord(it, isLat = false) } ?: "---"
+        tvGpsSog.text       = state.gpsSog?.let { "%.1f".format(it) } ?: "---"
+        tvGpsCog.text       = state.gpsCog?.let { "%.0f°".format(it) } ?: "---"
 
         state.errorMessage?.let {
             tvStatus.text = "✕  $it"
